@@ -24,14 +24,23 @@ def get_custom_categories():
     """Get all custom categories from Google Sheet"""
     try:
         apps_script_url = os.environ.get('APPS_SCRIPT_URL')
-        response = requests.get(f"{apps_script_url}?action=get_custom_categories", timeout=10)
+        print(f"[DEBUG] Apps Script URL: {apps_script_url}")
+        
+        response = requests.get(apps_script_url, params={'action': 'get_custom_categories'}, timeout=10)
+        
+        print(f"[DEBUG] Response status code: {response.status_code}")
+        print(f"[DEBUG] Response text: {response.text}")
         
         if response.status_code == 200:
             data = response.json()
+            print(f"[DEBUG] Parsed JSON data: {data}")
             return data if isinstance(data, dict) else {}
+        print(f"[DEBUG] Response not 200, returning empty dict")
         return {}
     except Exception as e:
-        print(f"Error getting custom categories: {e}")
+        print(f"[DEBUG] Error getting custom categories: {e}")
+        import traceback
+        print(f"[DEBUG] Traceback: {traceback.format_exc()}")
         return {}
 
 def save_custom_category(category_name):
@@ -44,10 +53,17 @@ def save_custom_category(category_name):
             'category_name': category_name
         }
         
+        print(f"[DEBUG] Saving custom category with payload: {payload}")
         response = requests.post(apps_script_url, json=payload, timeout=10)
+        
+        print(f"[DEBUG] Save response status: {response.status_code}")
+        print(f"[DEBUG] Save response text: {response.text}")
+        
         return response.status_code == 200
     except Exception as e:
-        print(f"Error saving custom category: {e}")
+        print(f"[DEBUG] Error saving custom category: {e}")
+        import traceback
+        print(f"[DEBUG] Traceback: {traceback.format_exc()}")
         return False
 
 def parse_date_with_gemini(date_input):
@@ -92,7 +108,10 @@ def parse_expense_with_gemini(message):
     custom_cats = get_custom_categories()
     custom_cat_names = list(custom_cats.keys())
     
+    print(f"[DEBUG] Custom categories retrieved: {custom_cat_names}")
+    
     categories_str = STANDARD_CATEGORIES + custom_cat_names
+    print(f"[DEBUG] All available categories for Gemini: {categories_str}")
     
     prompt = f"""
     Parse this expense message and extract the following information in JSON format:
@@ -121,6 +140,8 @@ def parse_expense_with_gemini(message):
         response = model.generate_content(prompt)
         result = response.text.strip()
         
+        print(f"[DEBUG] Gemini raw response: {result}")
+        
         # Remove code blocks if present
         if result.startswith('```'):
             result = result.split('```')[1]
@@ -129,9 +150,12 @@ def parse_expense_with_gemini(message):
         result = result.strip()
         
         parsed_data = json.loads(result)
+        print(f"[DEBUG] Parsed expense data: {parsed_data}")
         return parsed_data
     except Exception as e:
-        print(f"Error parsing with Gemini: {e}")
+        print(f"[DEBUG] Error parsing with Gemini: {e}")
+        import traceback
+        print(f"[DEBUG] Traceback: {traceback.format_exc()}")
         return None
 
 def add_expense_to_sheet(date, amount, description, category):
@@ -147,29 +171,37 @@ def add_expense_to_sheet(date, amount, description, category):
             'category': category
         }
         
+        print(f"[DEBUG] Adding expense with payload: {payload}")
         response = requests.post(apps_script_url, json=payload, timeout=10)
+        
+        print(f"[DEBUG] Add expense response status: {response.status_code}")
+        print(f"[DEBUG] Add expense response text: {response.text}")
         
         if response.status_code == 200:
             return True
         else:
-            print(f"Apps Script error: {response.status_code} - {response.text}")
+            print(f"[DEBUG] Apps Script error: {response.status_code} - {response.text}")
             return False
             
     except Exception as e:
-        print(f"Error sending to Apps Script: {e}")
+        print(f"[DEBUG] Error sending to Apps Script: {e}")
+        import traceback
+        print(f"[DEBUG] Traceback: {traceback.format_exc()}")
         return False
 
 def get_sheet_data():
     """Retrieve data from Google Sheet"""
     try:
         apps_script_url = os.environ.get('APPS_SCRIPT_URL')
-        response = requests.get(f"{apps_script_url}?action=get_expenses", timeout=10)
+        response = requests.get(apps_script_url, params={'action': 'get_expenses'}, timeout=10)
+        
+        print(f"[DEBUG] Get sheet data response status: {response.status_code}")
         
         if response.status_code == 200:
             return response.json()
         return None
     except Exception as e:
-        print(f"Error getting sheet data: {e}")
+        print(f"[DEBUG] Error getting sheet data: {e}")
         return None
 
 def calculate_stats(data, period='today'):
@@ -210,6 +242,11 @@ def whatsapp_webhook():
     """Handle incoming WhatsApp messages"""
     incoming_msg = request.values.get('Body', '').strip()
     from_number = request.values.get('From', '')
+    
+    print(f"\n[DEBUG] ===== NEW MESSAGE =====")
+    print(f"[DEBUG] From: {from_number}")
+    print(f"[DEBUG] Message: {incoming_msg}")
+    print(f"[DEBUG] Pending expenses: {pending_expenses}")
     
     resp = MessagingResponse()
     msg = resp.message()
@@ -264,6 +301,7 @@ def whatsapp_webhook():
     # Check if user is responding to a pending request
     if from_number in pending_expenses:
         pending = pending_expenses[from_number]
+        print(f"[DEBUG] User has pending request: {pending}")
         
         if pending['waiting_for'] == 'date':
             # Parse the date with Gemini
@@ -332,6 +370,9 @@ def whatsapp_webhook():
                 category_map[str(idx)] = cat_name
                 category_map[cat_name.lower()] = cat_name
             
+            print(f"[DEBUG] Category map: {category_map}")
+            print(f"[DEBUG] User input: {category_input.lower()}")
+            
             final_category = category_map.get(category_input.lower())
             
             if not final_category:
@@ -343,6 +384,8 @@ def whatsapp_webhook():
                 
                 msg.body(f"❌ Invalid category. Please choose:\n\n{cat_list}\n\nOr type 'cancel'")
                 return str(resp)
+            
+            print(f"[DEBUG] Final category selected: {final_category}")
             
             # Send acknowledgment first
             msg.body(f"✅ Adding expense...\n\nDate: {pending['date']}\nAmount: ₹{pending['amount']}\nDescription: {pending['description']}\nCategory: {final_category}")
@@ -372,6 +415,8 @@ def whatsapp_webhook():
                 msg.body("❌ Please provide a valid category name (at least 2 characters)")
                 return str(resp)
             
+            print(f"[DEBUG] Saving custom category: {custom_category}")
+            
             # Save this custom category to sheet
             save_custom_category(custom_category)
             
@@ -396,6 +441,7 @@ def whatsapp_webhook():
             return response_to_send
     
     # Parse new expense message
+    print(f"[DEBUG] Parsing new expense message")
     parsed_data = parse_expense_with_gemini(incoming_msg)
     
     if not parsed_data or not all(k in parsed_data for k in ['amount', 'description']):
