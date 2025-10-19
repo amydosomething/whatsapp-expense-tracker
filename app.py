@@ -15,10 +15,40 @@ genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
 model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
 # Categories
-CATEGORIES = ['Cable', 'Labour', 'Material Purchase', 'Fuel', 'Other']
+STANDARD_CATEGORIES = ['Cable', 'Labour', 'Material Purchase', 'Fuel']
 
-# Store pending expenses (in production, use Redis or database)
+# Store pending expenses
 pending_expenses = {}
+
+def get_custom_categories():
+    """Get all custom categories from Google Sheet"""
+    try:
+        apps_script_url = os.environ.get('APPS_SCRIPT_URL')
+        response = requests.get(f"{apps_script_url}?action=get_custom_categories", timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data if isinstance(data, dict) else {}
+        return {}
+    except Exception as e:
+        print(f"Error getting custom categories: {e}")
+        return {}
+
+def save_custom_category(category_name):
+    """Save custom category to Google Sheet"""
+    try:
+        apps_script_url = os.environ.get('APPS_SCRIPT_URL')
+        
+        payload = {
+            'action': 'save_custom_category',
+            'category_name': category_name
+        }
+        
+        response = requests.post(apps_script_url, json=payload, timeout=10)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"Error saving custom category: {e}")
+        return False
 
 def parse_date_with_gemini(date_input):
     """Use Gemini to parse any date format to DD-MM-YYYY"""
@@ -59,20 +89,24 @@ def parse_expense_with_gemini(message):
     """Use Gemini to parse the expense message"""
     
     current_year = datetime.now().year
+    custom_cats = get_custom_categories()
+    custom_cat_names = list(custom_cats.keys())
+    
+    categories_str = STANDARD_CATEGORIES + custom_cat_names
     
     prompt = f"""
     Parse this expense message and extract the following information in JSON format:
     - date (convert to DD-MM-YYYY format. Current year is {current_year}. If year not mentioned, use current year. If no date mentioned, return "missing")
     - amount (just the number, no currency symbols)
     - description (brief description of the expense)
-    - category (choose ONE from: Cable, Labour, Material Purchase, Fuel, Other)
+    - category (choose ONE from: {', '.join(categories_str)})
     
     Category rules:
     - Cable: any cable, wire, electrical cables, cable specs (100 sqmm, 4 core, etc)
     - Labour: labour work, advance labour, worker payments, worker names
     - Material Purchase: cement, bricks, sand, paint, screws, epoxy, adhesives, pipes, fittings, any construction materials
     - Fuel: petrol, diesel, CNG, fuel, any vehicle fuel
-    - Other: anything that doesn't fit above categories
+    {f'- Available custom categories: {", ".join(custom_cat_names)}' if custom_cat_names else ''}
     
     If you're not 100% sure about the category, return "uncertain" for category.
     
@@ -106,6 +140,7 @@ def add_expense_to_sheet(date, amount, description, category):
         apps_script_url = os.environ.get('APPS_SCRIPT_URL')
         
         payload = {
+            'action': 'add_expense',
             'date': date,
             'amount': amount,
             'description': description,
@@ -128,7 +163,7 @@ def get_sheet_data():
     """Retrieve data from Google Sheet"""
     try:
         apps_script_url = os.environ.get('APPS_SCRIPT_URL')
-        response = requests.get(apps_script_url, timeout=10)
+        response = requests.get(f"{apps_script_url}?action=get_expenses", timeout=10)
         
         if response.status_code == 200:
             return response.json()
@@ -244,7 +279,13 @@ def whatsapp_webhook():
                 pending['waiting_for'] = 'category'
                 pending_expenses[from_number] = pending
                 
-                msg.body(f"📋 Please choose a category:\n\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n5. Other\n\nReply with the number or category name.")
+                custom_cats = get_custom_categories()
+                cat_list = "1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel"
+                if custom_cats:
+                    for idx, cat_name in enumerate(custom_cats.keys(), start=5):
+                        cat_list += f"\n{idx}. {cat_name}"
+                
+                msg.body(f"📋 Please choose a category:\n\n{cat_list}\n\nReply with the number or category name.")
                 return str(resp)
             
             # Send acknowledgment first
@@ -271,33 +312,36 @@ def whatsapp_webhook():
             # User is choosing category
             category_input = incoming_msg.strip()
             
+            custom_cats = get_custom_categories()
+            
             # Map number or name to category
             category_map = {
                 '1': 'Cable',
                 '2': 'Labour', 
                 '3': 'Material Purchase',
                 '4': 'Fuel',
-                '5': 'Other',
                 'cable': 'Cable',
                 'labour': 'Labour',
                 'material': 'Material Purchase',
                 'material purchase': 'Material Purchase',
-                'fuel': 'Fuel',
-                'other': 'Other'
+                'fuel': 'Fuel'
             }
+            
+            # Add custom categories to map
+            for idx, cat_name in enumerate(custom_cats.keys(), start=5):
+                category_map[str(idx)] = cat_name
+                category_map[cat_name.lower()] = cat_name
             
             final_category = category_map.get(category_input.lower())
             
             if not final_category:
-                msg.body("❌ Invalid category. Please choose:\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n5. Other\n\nOr type 'cancel'")
-                return str(resp)
-            
-            # If user selected "Other", ask for custom category name
-            if final_category == 'Other':
-                pending['category'] = 'Other'
-                pending['waiting_for'] = 'custom_category'
-                pending_expenses[from_number] = pending
-                msg.body("📝 Please specify the custom category name:\n(Example: Food, Transport, Maintenance, etc.)")
+                custom_cats = get_custom_categories()
+                cat_list = "1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel"
+                if custom_cats:
+                    for idx, cat_name in enumerate(custom_cats.keys(), start=5):
+                        cat_list += f"\n{idx}. {cat_name}"
+                
+                msg.body(f"❌ Invalid category. Please choose:\n\n{cat_list}\n\nOr type 'cancel'")
                 return str(resp)
             
             # Send acknowledgment first
@@ -327,6 +371,9 @@ def whatsapp_webhook():
             if not custom_category or len(custom_category) < 2:
                 msg.body("❌ Please provide a valid category name (at least 2 characters)")
                 return str(resp)
+            
+            # Save this custom category to sheet
+            save_custom_category(custom_category)
             
             # Send acknowledgment first
             msg.body(f"✅ Adding expense...\n\nDate: {pending['date']}\nAmount: ₹{pending['amount']}\nDescription: {pending['description']}\nCategory: {custom_category}")
@@ -374,16 +421,21 @@ def whatsapp_webhook():
             'description': parsed_data['description'],
             'waiting_for': 'category'
         }
-        msg.body("📋 Please choose a category:\n\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n5. Other\n\nReply with the number or category name.")
+        custom_cats = get_custom_categories()
+        cat_list = "1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel"
+        if custom_cats:
+            for idx, cat_name in enumerate(custom_cats.keys(), start=5):
+                cat_list += f"\n{idx}. {cat_name}"
+        
+        msg.body(f"📋 Please choose a category:\n\n{cat_list}\n\nReply with the number or category name.")
         return str(resp)
     
-    # Check if category is Other
+    # Check if category needs custom name
     if parsed_data.get('category') == 'Other':
         pending_expenses[from_number] = {
             'date': parsed_data['date'],
             'amount': parsed_data['amount'],
             'description': parsed_data['description'],
-            'category': 'Other',
             'waiting_for': 'custom_category'
         }
         msg.body("📝 Please specify the custom category name:\n(Example: Food, Transport, Maintenance, etc.)")
