@@ -376,14 +376,36 @@ def whatsapp_webhook():
             final_category = category_map.get(category_input.lower())
             
             if not final_category:
-                custom_cats = get_custom_categories()
-                cat_list = "1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel"
-                if custom_cats:
-                    for idx, cat_name in enumerate(custom_cats.keys(), start=5):
-                        cat_list += f"\n{idx}. {cat_name}"
+                # User entered something that doesn't match - treat it as a custom category
+                print(f"[DEBUG] User entered custom category: {category_input}")
                 
-                msg.body(f"❌ Invalid category. Please choose:\n\n{cat_list}\n\nOr type 'cancel'")
-                return str(resp)
+                if len(category_input) < 2:
+                    msg.body("❌ Please provide a valid category name (at least 2 characters)")
+                    return str(resp)
+                
+                # Save and add this as custom category
+                pending['category'] = category_input
+                pending['waiting_for'] = 'custom_category_confirm'
+                pending_expenses[from_number] = pending
+                
+                msg.body(f"✅ Adding expense...\n\nDate: {pending['date']}\nAmount: ₹{pending['amount']}\nDescription: {pending['description']}\nCategory: {category_input}")
+                
+                response_to_send = str(resp)
+                
+                # Add to sheet in background
+                def add_in_background():
+                    add_expense_to_sheet(
+                        pending['date'],
+                        pending['amount'],
+                        pending['description'],
+                        category_input
+                    )
+                
+                thread = threading.Thread(target=add_in_background)
+                thread.start()
+                
+                del pending_expenses[from_number]
+                return response_to_send
             
             print(f"[DEBUG] Final category selected: {final_category}")
             
