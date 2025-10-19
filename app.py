@@ -74,13 +74,29 @@ def parse_expense_with_gemini(message, ask_category=False):
         
         parsed_data = json.loads(result)
         
-        # Convert date from YYYY-MM-DD to DD-MM-YYYY if present
+        # Convert date to DD-MM-YYYY format if present
         if parsed_data and 'date' in parsed_data and parsed_data['date'] != 'missing':
-            try:
-                date_obj = datetime.strptime(parsed_data['date'], '%Y-%m-%d')
-                parsed_data['date'] = date_obj.strftime('%d-%m-%Y')
-            except:
-                pass
+            # Try multiple date formats that Gemini might return
+            date_formats_to_try = [
+                '%Y-%m-%d',    # 2025-10-18
+                '%d-%m-%Y',    # 18-10-2025
+                '%d/%m/%Y',    # 18/10/2025
+                '%Y/%m/%d',    # 2025/10/18
+            ]
+            
+            date_converted = False
+            for fmt in date_formats_to_try:
+                try:
+                    date_obj = datetime.strptime(parsed_data['date'], fmt)
+                    parsed_data['date'] = date_obj.strftime('%d-%m-%Y')
+                    date_converted = True
+                    break
+                except:
+                    continue
+            
+            # If conversion failed, log it but continue
+            if not date_converted:
+                print(f"Warning: Could not convert date format: {parsed_data['date']}")
         
         return parsed_data
     except Exception as e:
