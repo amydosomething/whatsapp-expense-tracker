@@ -15,7 +15,7 @@ genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
 model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
 # Categories
-CATEGORIES = ['Cable', 'Labour', 'Material Purchase', 'Fuel']
+CATEGORIES = ['Cable', 'Labour', 'Material Purchase', 'Fuel', 'Other']
 
 # Store pending expenses (in production, use Redis or database)
 pending_expenses = {}
@@ -65,13 +65,14 @@ def parse_expense_with_gemini(message):
     - date (convert to DD-MM-YYYY format. Current year is {current_year}. If year not mentioned, use current year. If no date mentioned, return "missing")
     - amount (just the number, no currency symbols)
     - description (brief description of the expense)
-    - category (choose ONE from: Cable, Labour, Material Purchase, Fuel)
+    - category (choose ONE from: Cable, Labour, Material Purchase, Fuel, Other)
     
     Category rules:
     - Cable: any cable, wire, electrical cables, cable specs (100 sqmm, 4 core, etc)
     - Labour: labour work, advance labour, worker payments, worker names
     - Material Purchase: cement, bricks, sand, paint, screws, epoxy, adhesives, pipes, fittings, any construction materials
     - Fuel: petrol, diesel, CNG, fuel, any vehicle fuel
+    - Other: anything that doesn't fit above categories
     
     If you're not 100% sure about the category, return "uncertain" for category.
     
@@ -158,10 +159,12 @@ def calculate_stats(data, period='today'):
             continue
     
     # Calculate totals by category
-    category_totals = {cat: {'total': 0, 'count': 0} for cat in CATEGORIES}
+    category_totals = {}
     
     for row in filtered_data:
-        cat = row.get('category', 'Material Purchase')
+        cat = row.get('category', 'Other')
+        if cat not in category_totals:
+            category_totals[cat] = {'total': 0, 'count': 0}
         category_totals[cat]['total'] += float(row.get('amount', 0))
         category_totals[cat]['count'] += 1
     
@@ -202,7 +205,7 @@ def whatsapp_webhook():
             response_text = f"📊 {period_name}'s Expenses\n\n"
             
             grand_total = 0
-            for cat in CATEGORIES:
+            for cat in sorted(stats.keys()):
                 if stats[cat]['total'] > 0:
                     response_text += f"{cat}: ₹{stats[cat]['total']:,.0f} ({stats[cat]['count']} transactions)\n"
                     grand_total += stats[cat]['total']
@@ -223,7 +226,7 @@ def whatsapp_webhook():
             msg.body("No expenses found.")
         return str(resp)
     
-    # Check if user is responding to a pending date request
+    # Check if user is responding to a pending request
     if from_number in pending_expenses:
         pending = pending_expenses[from_number]
         
@@ -241,7 +244,7 @@ def whatsapp_webhook():
                 pending['waiting_for'] = 'category'
                 pending_expenses[from_number] = pending
                 
-                msg.body(f"📋 Please choose a category:\n\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n\nReply with the number or category name.")
+                msg.body(f"📋 Please choose a category:\n\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n5. Other\n\nReply with the number or category name.")
                 return str(resp)
             
             # Send acknowledgment first
@@ -274,17 +277,27 @@ def whatsapp_webhook():
                 '2': 'Labour', 
                 '3': 'Material Purchase',
                 '4': 'Fuel',
+                '5': 'Other',
                 'cable': 'Cable',
                 'labour': 'Labour',
                 'material': 'Material Purchase',
                 'material purchase': 'Material Purchase',
-                'fuel': 'Fuel'
+                'fuel': 'Fuel',
+                'other': 'Other'
             }
             
             final_category = category_map.get(category_input.lower())
             
             if not final_category:
-                msg.body("❌ Invalid category. Please choose:\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n\nOr type 'cancel'")
+                msg.body("❌ Invalid category. Please choose:\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n5. Other\n\nOr type 'cancel'")
+                return str(resp)
+            
+            # If user selected "Other", ask for custom category name
+            if final_category == 'Other':
+                pending['category'] = 'Other'
+                pending['waiting_for'] = 'custom_category'
+                pending_expenses[from_number] = pending
+                msg.body("📝 Please specify the custom category name:\n(Example: Food, Transport, Maintenance, etc.)")
                 return str(resp)
             
             # Send acknowledgment first
@@ -299,6 +312,34 @@ def whatsapp_webhook():
                     pending['amount'],
                     pending['description'],
                     final_category
+                )
+            
+            thread = threading.Thread(target=add_in_background)
+            thread.start()
+            
+            del pending_expenses[from_number]
+            return response_to_send
+        
+        elif pending['waiting_for'] == 'custom_category':
+            # User is specifying custom category name
+            custom_category = incoming_msg.strip()
+            
+            if not custom_category or len(custom_category) < 2:
+                msg.body("❌ Please provide a valid category name (at least 2 characters)")
+                return str(resp)
+            
+            # Send acknowledgment first
+            msg.body(f"✅ Adding expense...\n\nDate: {pending['date']}\nAmount: ₹{pending['amount']}\nDescription: {pending['description']}\nCategory: {custom_category}")
+            
+            response_to_send = str(resp)
+            
+            # Add to sheet in background
+            def add_in_background():
+                add_expense_to_sheet(
+                    pending['date'],
+                    pending['amount'],
+                    pending['description'],
+                    custom_category
                 )
             
             thread = threading.Thread(target=add_in_background)
@@ -333,7 +374,19 @@ def whatsapp_webhook():
             'description': parsed_data['description'],
             'waiting_for': 'category'
         }
-        msg.body("📋 Please choose a category:\n\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n\nReply with the number or category name.")
+        msg.body("📋 Please choose a category:\n\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n5. Other\n\nReply with the number or category name.")
+        return str(resp)
+    
+    # Check if category is Other
+    if parsed_data.get('category') == 'Other':
+        pending_expenses[from_number] = {
+            'date': parsed_data['date'],
+            'amount': parsed_data['amount'],
+            'description': parsed_data['description'],
+            'category': 'Other',
+            'waiting_for': 'custom_category'
+        }
+        msg.body("📝 Please specify the custom category name:\n(Example: Food, Transport, Maintenance, etc.)")
         return str(resp)
     
     # Send acknowledgment first
