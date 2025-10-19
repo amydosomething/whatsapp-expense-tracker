@@ -99,7 +99,7 @@ def parse_date_input(date_input):
     
     current_year = datetime.now().year
     
-    # Try different date formats
+    # Try different date formats first
     date_formats = [
         '%d-%m-%Y',    # 19-10-2025
         '%d/%m/%Y',    # 19/10/2025
@@ -114,8 +114,32 @@ def parse_date_input(date_input):
         except:
             continue
     
-    # Try parsing "19 oct", "19 october", "19th oct" etc. without year
-    # Pattern: day (optional st/nd/rd/th) month_name
+    # Try parsing "19 oct 2024" format (WITH year)
+    year_pattern = r'(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)\s+(\d{2,4})'
+    year_match = re.search(year_pattern, date_input, re.IGNORECASE)
+    
+    if year_match:
+        day = year_match.group(1)
+        month_name = year_match.group(2)
+        year = year_match.group(3)
+        
+        # Convert 2-digit year to 4-digit (25 -> 2025)
+        if len(year) == 2:
+            year = '20' + year
+        
+        # Try to parse with detected year
+        try:
+            date_str = f"{day} {month_name} {year}"
+            date_obj = datetime.strptime(date_str, '%d %B %Y')  # Full month name
+            return date_obj.strftime('%d-%m-%Y')
+        except:
+            try:
+                date_obj = datetime.strptime(date_str, '%d %b %Y')  # Abbreviated month
+                return date_obj.strftime('%d-%m-%Y')
+            except:
+                pass
+    
+    # Try parsing "19 oct" format (WITHOUT year - use current year)
     pattern = r'(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)'
     match = re.search(pattern, date_input, re.IGNORECASE)
     
