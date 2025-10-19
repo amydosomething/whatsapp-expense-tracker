@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 # Configure Gemini API
 genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
-model = genai.GenerativeModel('gemini-pro')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 def parse_expense_with_gemini(message):
     """Use Gemini to parse the expense message"""
