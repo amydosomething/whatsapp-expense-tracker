@@ -5,7 +5,7 @@ import requests
 import os
 from datetime import datetime, timedelta
 import json
-import re
+import threading
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-here')
@@ -20,29 +20,49 @@ CATEGORIES = ['Cable', 'Labour', 'Material Purchase', 'Fuel']
 # Store pending expenses (in production, use Redis or database)
 pending_expenses = {}
 
-def parse_expense_with_gemini(message, ask_category=False):
+def parse_date_with_gemini(date_input):
+    """Use Gemini to parse any date format to DD-MM-YYYY"""
+    
+    current_date = datetime.now().strftime('%d-%m-%Y')
+    current_year = datetime.now().year
+    
+    prompt = f"""
+    Convert this date to DD-MM-YYYY format.
+    
+    Current date: {current_date}
+    Current year: {current_year}
+    
+    Date input: "{date_input}"
+    
+    Rules:
+    - If year is missing, use current year ({current_year})
+    - If user says "today", use {current_date}
+    - If user says "yesterday", calculate it
+    - Handle formats like: 18 oct, 18/10/2025, 18-10-2025, 18 oct 2024, 18/10/24, etc.
+    
+    Return ONLY the date in DD-MM-YYYY format, nothing else.
+    Example: 18-10-2025
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        result = response.text.strip()
+        
+        # Validate it's in correct format
+        datetime.strptime(result, '%d-%m-%Y')
+        return result
+    except Exception as e:
+        print(f"Error parsing date with Gemini: {e}")
+        return None
+
+def parse_expense_with_gemini(message):
     """Use Gemini to parse the expense message"""
     
-    if ask_category:
-        category_prompt = f"""
-        Classify this expense into ONE of these categories: {', '.join(CATEGORIES)}
-        
-        Message: "{message}"
-        
-        Return ONLY the category name, nothing else.
-        """
-        try:
-            response = model.generate_content(category_prompt)
-            category = response.text.strip()
-            if category in CATEGORIES:
-                return category
-            return "uncertain"
-        except:
-            return "uncertain"
+    current_year = datetime.now().year
     
     prompt = f"""
     Parse this expense message and extract the following information in JSON format:
-    - date (in YYYY-MM-DD format if mentioned, otherwise return "missing")
+    - date (convert to DD-MM-YYYY format. Current year is {current_year}. If year not mentioned, use current year. If no date mentioned, return "missing")
     - amount (just the number, no currency symbols)
     - description (brief description of the expense)
     - category (choose ONE from: Cable, Labour, Material Purchase, Fuel)
@@ -58,7 +78,7 @@ def parse_expense_with_gemini(message, ask_category=False):
     Message: "{message}"
     
     Return ONLY a valid JSON object with keys: date, amount, description, category
-    Example: {{"date": "2025-10-15", "amount": "2000", "description": "Labour work", "category": "Labour"}}
+    Example: {{"date": "18-10-2025", "amount": "2000", "description": "Labour work", "category": "Labour"}}
     If date not mentioned: {{"date": "missing", "amount": "2000", "description": "Labour work", "category": "Labour"}}
     """
     
@@ -66,6 +86,7 @@ def parse_expense_with_gemini(message, ask_category=False):
         response = model.generate_content(prompt)
         result = response.text.strip()
         
+        # Remove code blocks if present
         if result.startswith('```'):
             result = result.split('```')[1]
             if result.startswith('json'):
@@ -73,113 +94,10 @@ def parse_expense_with_gemini(message, ask_category=False):
         result = result.strip()
         
         parsed_data = json.loads(result)
-        
-        # Convert date to DD-MM-YYYY format if present
-        if parsed_data and 'date' in parsed_data and parsed_data['date'] != 'missing':
-            # Try multiple date formats that Gemini might return
-            date_formats_to_try = [
-                '%Y-%m-%d',    # 2025-10-18
-                '%d-%m-%Y',    # 18-10-2025
-                '%d/%m/%Y',    # 18/10/2025
-                '%Y/%m/%d',    # 2025/10/18
-            ]
-            
-            date_converted = False
-            for fmt in date_formats_to_try:
-                try:
-                    date_obj = datetime.strptime(parsed_data['date'], fmt)
-                    parsed_data['date'] = date_obj.strftime('%d-%m-%Y')
-                    date_converted = True
-                    break
-                except:
-                    continue
-            
-            # If conversion failed, log it but continue
-            if not date_converted:
-                print(f"Warning: Could not convert date format: {parsed_data['date']}")
-        
         return parsed_data
     except Exception as e:
         print(f"Error parsing with Gemini: {e}")
         return None
-
-def parse_date_input(date_input):
-    """Parse date input with smart year detection"""
-    date_input = date_input.lower().strip()
-    
-    # Handle special keywords
-    if date_input == 'today':
-        return datetime.now().strftime('%d-%m-%Y')
-    elif date_input == 'yesterday':
-        return (datetime.now() - timedelta(days=1)).strftime('%d-%m-%Y')
-    
-    current_year = datetime.now().year
-    
-    # Try different date formats first
-    date_formats = [
-        '%d-%m-%Y',    # 19-10-2025
-        '%d/%m/%Y',    # 19/10/2025
-        '%d-%m-%y',    # 19-10-25
-        '%d/%m/%y',    # 19/10/25
-    ]
-    
-    for fmt in date_formats:
-        try:
-            date_obj = datetime.strptime(date_input, fmt)
-            return date_obj.strftime('%d-%m-%Y')
-        except:
-            continue
-    
-    # Try parsing "19 oct 2024" format (WITH year)
-    year_pattern = r'(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)\s+(\d{2,4})'
-    year_match = re.search(year_pattern, date_input, re.IGNORECASE)
-    
-    if year_match:
-        day = year_match.group(1)
-        month_name = year_match.group(2)
-        year = year_match.group(3)
-        
-        # Convert 2-digit year to 4-digit (25 -> 2025)
-        if len(year) == 2:
-            year = '20' + year
-        
-        # Try to parse with detected year
-        try:
-            date_str = f"{day} {month_name} {year}"
-            date_obj = datetime.strptime(date_str, '%d %B %Y')  # Full month name
-            return date_obj.strftime('%d-%m-%Y')
-        except:
-            try:
-                date_obj = datetime.strptime(date_str, '%d %b %Y')  # Abbreviated month
-                return date_obj.strftime('%d-%m-%Y')
-            except:
-                pass
-    
-    # Try parsing "19 oct" format (WITHOUT year - use current year)
-    pattern = r'(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)'
-    match = re.search(pattern, date_input, re.IGNORECASE)
-    
-    if match:
-        day = match.group(1)
-        month_name = match.group(2)
-        
-        # Try to parse with current year
-        try:
-            # Try full month name first
-            date_str = f"{day} {month_name} {current_year}"
-            date_obj = datetime.strptime(date_str, '%d %B %Y')
-            return date_obj.strftime('%d-%m-%Y')
-        except:
-            try:
-                # Try abbreviated month name
-                date_str = f"{day} {month_name} {current_year}"
-                date_obj = datetime.strptime(date_str, '%d %b %Y')
-                return date_obj.strftime('%d-%m-%Y')
-            except:
-                pass
-    
-    # If nothing worked, return None
-    return None
 
 def add_expense_to_sheet(date, amount, description, category):
     """Send expense data to Google Apps Script"""
@@ -310,11 +228,11 @@ def whatsapp_webhook():
         pending = pending_expenses[from_number]
         
         if pending['waiting_for'] == 'date':
-            # Parse the date with smart year detection
-            final_date = parse_date_input(incoming_msg)
+            # Parse the date with Gemini
+            final_date = parse_date_with_gemini(incoming_msg)
             
             if not final_date:
-                msg.body("❌ Enter date for the previous expense in DD-MM-YYYY format or type 'cancel' to cancel the previous expense")
+                msg.body("❌ I couldn't understand that date. Please try again or type 'cancel'")
                 return str(resp)
             
             # Now check if category is uncertain
@@ -326,21 +244,25 @@ def whatsapp_webhook():
                 msg.body(f"📋 Please choose a category:\n\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n\nReply with the number or category name.")
                 return str(resp)
             
-            # Add to sheet
-            success = add_expense_to_sheet(
-                final_date,
-                pending['amount'],
-                pending['description'],
-                pending['category']
-            )
+            # Send acknowledgment first
+            msg.body(f"✅ Adding expense...\n\nDate: {final_date}\nAmount: ₹{pending['amount']}\nDescription: {pending['description']}\nCategory: {pending['category']}")
             
-            if success:
-                msg.body(f"✅ Expense added!\n\nDate: {final_date}\nAmount: ₹{pending['amount']}\nDescription: {pending['description']}\nCategory: {pending['category']}")
-            else:
-                msg.body("❌ Failed to add expense. Please try again.")
+            response_to_send = str(resp)
+            
+            # Add to sheet in background
+            def add_in_background():
+                add_expense_to_sheet(
+                    final_date,
+                    pending['amount'],
+                    pending['description'],
+                    pending['category']
+                )
+            
+            thread = threading.Thread(target=add_in_background)
+            thread.start()
             
             del pending_expenses[from_number]
-            return str(resp)
+            return response_to_send
         
         elif pending['waiting_for'] == 'category':
             # User is choosing category
@@ -362,24 +284,28 @@ def whatsapp_webhook():
             final_category = category_map.get(category_input.lower())
             
             if not final_category:
-                msg.body("❌ Invalid category. Please choose:\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n\nOr type 'cancel' to cancel this expense.")
+                msg.body("❌ Invalid category. Please choose:\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n\nOr type 'cancel'")
                 return str(resp)
             
-            # Add to sheet
-            success = add_expense_to_sheet(
-                pending['date'],
-                pending['amount'],
-                pending['description'],
-                final_category
-            )
+            # Send acknowledgment first
+            msg.body(f"✅ Adding expense...\n\nDate: {pending['date']}\nAmount: ₹{pending['amount']}\nDescription: {pending['description']}\nCategory: {final_category}")
             
-            if success:
-                msg.body(f"✅ Expense added!\n\nDate: {pending['date']}\nAmount: ₹{pending['amount']}\nDescription: {pending['description']}\nCategory: {final_category}")
-            else:
-                msg.body("❌ Failed to add expense. Please try again.")
+            response_to_send = str(resp)
+            
+            # Add to sheet in background
+            def add_in_background():
+                add_expense_to_sheet(
+                    pending['date'],
+                    pending['amount'],
+                    pending['description'],
+                    final_category
+                )
+            
+            thread = threading.Thread(target=add_in_background)
+            thread.start()
             
             del pending_expenses[from_number]
-            return str(resp)
+            return response_to_send
     
     # Parse new expense message
     parsed_data = parse_expense_with_gemini(incoming_msg)
@@ -396,7 +322,7 @@ def whatsapp_webhook():
             'category': parsed_data.get('category', 'uncertain'),
             'waiting_for': 'date'
         }
-        msg.body("📅 Please enter the date for this expense:\n(Format: DD-MM-YYYY or 'today' or 'yesterday')")
+        msg.body("📅 Please enter the date for this expense:\n(Example: today, yesterday, 18 oct, 18/10/2025)")
         return str(resp)
     
     # Check if category is uncertain
@@ -410,20 +336,24 @@ def whatsapp_webhook():
         msg.body("📋 Please choose a category:\n\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n\nReply with the number or category name.")
         return str(resp)
     
-    # Add directly to sheet
-    success = add_expense_to_sheet(
-        parsed_data['date'],
-        parsed_data['amount'],
-        parsed_data['description'],
-        parsed_data['category']
-    )
+    # Send acknowledgment first
+    msg.body(f"✅ Adding expense...\n\nDate: {parsed_data['date']}\nAmount: ₹{parsed_data['amount']}\nDescription: {parsed_data['description']}\nCategory: {parsed_data['category']}")
     
-    if success:
-        msg.body(f"✅ Expense added!\n\nDate: {parsed_data['date']}\nAmount: ₹{parsed_data['amount']}\nDescription: {parsed_data['description']}\nCategory: {parsed_data['category']}")
-    else:
-        msg.body("❌ Failed to add expense. Please try again.")
+    response_to_send = str(resp)
     
-    return str(resp)
+    # Add to sheet in background
+    def add_in_background():
+        add_expense_to_sheet(
+            parsed_data['date'],
+            parsed_data['amount'],
+            parsed_data['description'],
+            parsed_data['category']
+        )
+    
+    thread = threading.Thread(target=add_in_background)
+    thread.start()
+    
+    return response_to_send
 
 @app.route('/', methods=['GET'])
 def home():
