@@ -323,7 +323,7 @@ def whatsapp_webhook():
                     for idx, cat_name in enumerate(custom_cats.keys(), start=5):
                         cat_list += f"\n{idx}. {cat_name}"
                 
-                msg.body(f"📋 Please choose a category:\n\n{cat_list}\n\nReply with the number or category name.")
+                msg.body(f"📋 Please choose a category:\n\n{cat_list}\n\nReply with the number or reply with category name or enter CUSTOM category name.")
                 return str(resp)
             
             # Send acknowledgment first
