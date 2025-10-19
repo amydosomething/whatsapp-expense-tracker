@@ -5,13 +5,14 @@ import requests
 import os
 from datetime import datetime, timedelta
 import json
+import re
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-here')
 
 # Configure Gemini API
 genai.configure(api_key=os.environ.get('GEMINI_API_KEY'))
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-2.0-flash-exp')
 
 # Categories
 CATEGORIES = ['Cable', 'Labour', 'Material Purchase', 'Fuel']
@@ -85,6 +86,60 @@ def parse_expense_with_gemini(message, ask_category=False):
     except Exception as e:
         print(f"Error parsing with Gemini: {e}")
         return None
+
+def parse_date_input(date_input):
+    """Parse date input with smart year detection"""
+    date_input = date_input.lower().strip()
+    
+    # Handle special keywords
+    if date_input == 'today':
+        return datetime.now().strftime('%d-%m-%Y')
+    elif date_input == 'yesterday':
+        return (datetime.now() - timedelta(days=1)).strftime('%d-%m-%Y')
+    
+    current_year = datetime.now().year
+    
+    # Try different date formats
+    date_formats = [
+        '%d-%m-%Y',    # 19-10-2025
+        '%d/%m/%Y',    # 19/10/2025
+        '%d-%m-%y',    # 19-10-25
+        '%d/%m/%y',    # 19/10/25
+    ]
+    
+    for fmt in date_formats:
+        try:
+            date_obj = datetime.strptime(date_input, fmt)
+            return date_obj.strftime('%d-%m-%Y')
+        except:
+            continue
+    
+    # Try parsing "19 oct", "19 october", "19th oct" etc. without year
+    # Pattern: day (optional st/nd/rd/th) month_name
+    pattern = r'(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)'
+    match = re.search(pattern, date_input, re.IGNORECASE)
+    
+    if match:
+        day = match.group(1)
+        month_name = match.group(2)
+        
+        # Try to parse with current year
+        try:
+            # Try full month name first
+            date_str = f"{day} {month_name} {current_year}"
+            date_obj = datetime.strptime(date_str, '%d %B %Y')
+            return date_obj.strftime('%d-%m-%Y')
+        except:
+            try:
+                # Try abbreviated month name
+                date_str = f"{day} {month_name} {current_year}"
+                date_obj = datetime.strptime(date_str, '%d %b %Y')
+                return date_obj.strftime('%d-%m-%Y')
+            except:
+                pass
+    
+    # If nothing worked, return None
+    return None
 
 def add_expense_to_sheet(date, amount, description, category):
     """Send expense data to Google Apps Script"""
@@ -170,6 +225,15 @@ def whatsapp_webhook():
     # Check for commands
     command = incoming_msg.lower()
     
+    # Cancel/Reset command
+    if command in ['cancel', 'reset']:
+        if from_number in pending_expenses:
+            del pending_expenses[from_number]
+            msg.body("🔄 Previous expense cancelled. You can now add a new expense.")
+        else:
+            msg.body("No pending expense to cancel.")
+        return str(resp)
+    
     # Stats commands
     if command in ['today', 'week', 'month']:
         data = get_sheet_data()
@@ -206,56 +270,36 @@ def whatsapp_webhook():
         pending = pending_expenses[from_number]
         
         if pending['waiting_for'] == 'date':
-            # Parse the date
-            date_input = incoming_msg.lower()
+            # Parse the date with smart year detection
+            final_date = parse_date_input(incoming_msg)
             
-            try:
-                if date_input == 'today':
-                    final_date = datetime.now().strftime('%d-%m-%Y')
-                elif date_input == 'yesterday':
-                    final_date = (datetime.now() - timedelta(days=1)).strftime('%d-%m-%Y')
-                else:
-                    # Try multiple date formats
-                    for fmt in ['%d-%m-%Y', '%d/%m/%Y', '%d-%m-%y', '%d/%m/%y']:
-                        try:
-                            date_obj = datetime.strptime(date_input, fmt)
-                            final_date = date_obj.strftime('%d-%m-%Y')
-                            break
-                        except:
-                            continue
-                    else:
-                        msg.body("❌ Invalid date format. Please use DD-MM-YYYY or 'today' or 'yesterday'")
-                        return str(resp)
-                
-                # Now check if category is uncertain
-                if pending.get('category') == 'uncertain':
-                    pending['date'] = final_date
-                    pending['waiting_for'] = 'category'
-                    pending_expenses[from_number] = pending
-                    
-                    msg.body(f"📋 Please choose a category:\n\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n\nReply with the number or category name.")
-                    return str(resp)
-                
-                # Add to sheet
-                success = add_expense_to_sheet(
-                    final_date,
-                    pending['amount'],
-                    pending['description'],
-                    pending['category']
-                )
-                
-                if success:
-                    msg.body(f"✅ Expense added!\n\nDate: {final_date}\nAmount: ₹{pending['amount']}\nDescription: {pending['description']}\nCategory: {pending['category']}")
-                else:
-                    msg.body("❌ Failed to add expense. Please try again.")
-                
-                del pending_expenses[from_number]
-                
-            except Exception as e:
-                print(f"Error processing date: {e}")
-                msg.body("❌ Error processing date. Please try again.")
-                del pending_expenses[from_number]
+            if not final_date:
+                msg.body("❌ Enter date for the previous expense in DD-MM-YYYY format or type 'cancel' to cancel the previous expense")
+                return str(resp)
             
+            # Now check if category is uncertain
+            if pending.get('category') == 'uncertain':
+                pending['date'] = final_date
+                pending['waiting_for'] = 'category'
+                pending_expenses[from_number] = pending
+                
+                msg.body(f"📋 Please choose a category:\n\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n\nReply with the number or category name.")
+                return str(resp)
+            
+            # Add to sheet
+            success = add_expense_to_sheet(
+                final_date,
+                pending['amount'],
+                pending['description'],
+                pending['category']
+            )
+            
+            if success:
+                msg.body(f"✅ Expense added!\n\nDate: {final_date}\nAmount: ₹{pending['amount']}\nDescription: {pending['description']}\nCategory: {pending['category']}")
+            else:
+                msg.body("❌ Failed to add expense. Please try again.")
+            
+            del pending_expenses[from_number]
             return str(resp)
         
         elif pending['waiting_for'] == 'category':
@@ -278,7 +322,7 @@ def whatsapp_webhook():
             final_category = category_map.get(category_input.lower())
             
             if not final_category:
-                msg.body("❌ Invalid category. Please choose:\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel")
+                msg.body("❌ Invalid category. Please choose:\n1. Cable\n2. Labour\n3. Material Purchase\n4. Fuel\n\nOr type 'cancel' to cancel this expense.")
                 return str(resp)
             
             # Add to sheet
