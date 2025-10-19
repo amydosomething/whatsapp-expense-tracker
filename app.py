@@ -38,6 +38,15 @@ def parse_expense_with_gemini(message):
         
         import json
         parsed_data = json.loads(result)
+        
+        # Convert date from YYYY-MM-DD to DD-MM-YYYY
+        if parsed_data and 'date' in parsed_data:
+            try:
+                date_obj = datetime.strptime(parsed_data['date'], '%Y-%m-%d')
+                parsed_data['date'] = date_obj.strftime('%d-%m-%Y')
+            except:
+                pass  # If conversion fails, keep original format
+        
         return parsed_data
     except Exception as e:
         print(f"Error parsing with Gemini: {e}")
